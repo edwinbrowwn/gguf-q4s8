@@ -1,0 +1,4 @@
+huggingface-hub==0.36.2
+ijson==3.5.1
+numpy==2.5.1
+pyarrow==25.0.0

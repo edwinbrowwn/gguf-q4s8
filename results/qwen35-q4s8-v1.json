@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "run_id": "qwen35-Q4S8-v1-3datasets-i1000-b512-s20260808",
+  "model": {
+    "architecture": "Qwen3.6-35B-A3B with embedded MTP",
+    "parameters": 35505251456,
+    "source_type": "BF16",
+    "source_mib": 67764.29,
+    "quantized_bytes": 21131203072,
+    "quantized_mib": 20152.29,
+    "quantized_bpw": 4.76,
+    "size_reduction_percent": 70.2612,
+    "tensor_counts": {
+      "F32": 370,
+      "Q4_0": 119,
+      "Q4_1": 10,
+      "Q8_0": 254
+    }
+  },
+  "calibration": {
+    "datasets": [
+      "nvidia/Open-SWE-Traces",
+      "nvidia/Nemotron-SFT-Math-v4",
+      "nvidia/ChatQA2-Long-SFT-data"
+    ],
+    "chunk_quotas": [334, 333, 333],
+    "iterations": 1000,
+    "batch_size": 512,
+    "context_size": 512,
+    "seed": 20260808,
+    "holdout_fraction": 0.1,
+    "max_record_chars": 24000,
+    "mtp_aware_imatrix": true
+  },
+  "quality": {
+    "reference": "BF16 token distributions",
+    "code20": {
+      "chunks": 20,
+      "bf16_ppl": 2.571697,
+      "q4s8_ppl": 2.613995,
+      "ppl_change_percent": 1.6447,
+      "mean_kld": 0.023788,
+      "mean_kld_error": 0.000964,
+      "same_top_percent": 95.471
+    },
+    "wikitext20": {
+      "chunks": 20,
+      "bf16_ppl": 6.597632,
+      "q4s8_ppl": 6.716739,
+      "ppl_change_percent": 1.8053,
+      "mean_kld": 0.027803,
+      "mean_kld_error": 0.000888,
+      "same_top_percent": 92.078
+    },
+    "heldout_openswe500": {
+      "chunks": 500,
+      "bf16_ppl": 2.179704,
+      "q4s8_ppl": 2.198697,
+      "ppl_change_percent": 0.8714,
+      "mean_kld": 0.108394,
+      "mean_kld_error": 0.001881,
+      "median_kld": 0.001331,
+      "p95_kld": 0.311899,
+      "p99_kld": 2.478030,
+      "same_top_percent": 93.684
+    }
+  },
+  "performance": {
+    "llama_cpp_build_commit": "4dd942f9f",
+    "hardware": "4 x AMD Radeon Pro V620 32 GiB",
+    "backend": "ROCm",
+    "configuration": {
+      "split_mode": "layer",
+      "tensor_split": "1/1/1/1",
+      "flash_attention": true,
+      "batch": 2048,
+      "microbatch": 256,
+      "kv_type": "f16"
+    },
+    "pp4096": {
+      "mean_tokens_per_second": 6246.045535,
+      "samples_tokens_per_second": [6245.76, 6251.07, 6241.30]
+    },
+    "normal_decode_six_prompt": {
+      "mean_tokens_per_second": 81.39269060809094,
+      "per_prompt_tokens_per_second": {
+        "gpu": 81.2870663862898,
+        "coding": 81.54795894392923,
+        "math": 81.43458472735716,
+        "knowledge": 81.4416054939998,
+        "reasoning": 81.42316237702836,
+        "swe": 81.22176571994132
+      }
+    },
+    "mtp_decode_six_prompt": {
+      "draft_n_max": 3,
+      "mean_tokens_per_second": 120.39821173634945,
+      "mean_acceptance": 0.6401180758631417,
+      "throughput_gain_percent": 47.9226,
+      "per_prompt": {
+        "gpu": {"tokens_per_second": 118.09166634952597, "acceptance": 0.6235955056179775},
+        "coding": {"tokens_per_second": 122.79269930250389, "acceptance": 0.6595330739299611},
+        "math": {"tokens_per_second": 147.2746001077521, "acceptance": 0.8702830188679245},
+        "knowledge": {"tokens_per_second": 112.39388436776683, "acceptance": 0.5661375661375662},
+        "reasoning": {"tokens_per_second": 113.96391884522498, "acceptance": 0.5845323741007195},
+        "swe": {"tokens_per_second": 107.87250144532297, "acceptance": 0.5366269165247018}
+      }
+    },
+    "mtp_projection_q4_vs_q8_five_prompt": {
+      "q4_tokens_per_second": 119.288,
+      "q8_tokens_per_second": 118.623,
+      "q4_acceptance": 0.62902,
+      "q8_acceptance": 0.62881,
+      "q4_size_saving_mib": 4.0
+    }
+  }
+}

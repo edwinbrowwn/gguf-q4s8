@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+q4s8-runs/
+*.gguf
+*.kld
+*.log
