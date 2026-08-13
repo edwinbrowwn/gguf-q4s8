@@ -1,74 +1,215 @@
 # gguf-q4s8
 
-`gguf-q4s8` is a reproducible, model-agnostic mixed-precision GGUF workflow. It starts from a BF16 GGUF, uses calibration data to generate an importance matrix on GPU, keeps Q4_0 as the base, and automatically promotes selected tensors to Q8_0 under a byte budget. Q4S8 is a recipe, not a new GGUF tensor type.
+A simple, reproducible workflow for making mixed-precision GGUF models.
 
-## One-command workflow
+Q4S8 means:
 
-Build or use a llama.cpp tree with `llama-imatrix` and `llama-quantize`, install the Python dependencies, then run:
+- Q4_0 is the default tensor type;
+- selected tensors are automatically promoted to Q8_0;
+- the selection is based on the BF16 model and calibration data;
+- no new GGUF tensor type is introduced.
+
+The workflow works with dense, MoE, MTP, single-file, and split BF16 GGUF models, provided the installed llama.cpp build supports the model.
+
+## What you need
+
+- a BF16 GGUF model;
+- a built llama.cpp tree containing `llama-imatrix` and `llama-quantize`;
+- Python 3 and the packages in [`requirements.txt`](requirements.txt);
+- enough disk space for the source model, calibration files, imatrices, plans, and output model.
+
+Install the Python dependencies:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Check the llama.cpp tools and available GPUs:
+
+```bash
+/path/to/llama.cpp/build/bin/llama-imatrix --list-devices
+/path/to/llama.cpp/build/bin/llama-quantize --help
+```
+
+## End-to-end quantization
+
+Use `build-q4s8-calibration.py`. It performs the complete workflow:
+
+1. selects calibration text;
+2. runs one GPU imatrix job per calibration source;
+3. merges the imatrices;
+4. derives the Q4_0 base map;
+5. automatically selects Q8_0 promotions;
+6. quantizes the BF16 model;
+7. writes a manifest, plans, logs, and output model.
+
+Example with a split model:
 
 ```bash
 python3 scripts/build-q4s8-calibration.py \
-  --model /models/Muse-Glimmer-30B-BF16-00001-of-00002.gguf \
-  --llama-root /src/llama.cpp \
-  --run-id muse-glimmer-q4s8-v1 \
+  --model /models/MyModel-BF16-00001-of-00002.gguf \
+  --llama-root /path/to/llama.cpp \
+  --run-id mymodel-q4s8-v1 \
   --output-root /models/q4s8-runs \
   --device auto \
   --q8-fraction 10
 ```
 
-The model argument is the first shard for a split GGUF. The loader discovers the remaining shards. `--device auto` discovers accelerator devices; use `--device ROCm0,ROCm1,ROCm2,ROCm3` when explicit routing is required. The calibration command defaults to the pinned three-dataset recipe below. Pass dataset IDs positionally to use another compatible set, or `--calibration-dir DIR` to reuse existing `*-calibration.txt` files.
-
-The command creates an immutable run directory containing selected corpora, GPU-generated per-source imatrices, a merged imatrix, Q4 dry-run output, the automatic Q8 ranking, tensor overrides, quantization logs, and the final GGUF. Existing run IDs are never overwritten.
-
-For a prepared calibration-only run:
+Example with a single-file model:
 
 ```bash
 python3 scripts/build-q4s8-calibration.py \
-  --model /models/model-BF16.gguf --llama-root /src/llama.cpp \
-  --run-id model-calibration --prepare-only
+  --model /models/MyModel-BF16.gguf \
+  --llama-root /path/to/llama.cpp \
+  --run-id mymodel-q4s8-v1 \
+  --output-root /models/q4s8-runs \
+  --device auto \
+  --q8-fraction 10
 ```
 
-For an existing merged imatrix and no calibration collection, use the lower-level builder:
+For explicit GPU routing:
 
 ```bash
-scripts/build-q4s8.sh \
-  --repo /src/llama.cpp \
-  --model /models/model-BF16.gguf \
-  --imatrix /models/imatrix-merged.gguf \
-  --output /models/model-Q4S8.gguf \
-  --q8-fraction 10 \
-  --protect-low-bandwidth
+--device ROCm0,ROCm1,ROCm2,ROCm3
 ```
 
-Use `--plan-only` to inspect the Q4 base, ranked promotions, estimated size, and generated tensor map without writing a model.
+Use the devices reported by your llama.cpp build. `--device auto` discovers accelerator devices automatically.
 
-## Default calibration recipe
+The first shard is the only model path you pass for a split GGUF. The remaining shards are discovered automatically, and the quantizer writes matching numbered output shards.
 
-The default corpus is split equally across:
+## Calibration data
+
+With no dataset arguments, the command uses the pinned default recipe:
 
 - `nvidia/Open-SWE-Traces`
 - `nvidia/Nemotron-SFT-Math-v4`
 - `nvidia/ChatQA2-Long-SFT-data`
 
-The pinned revisions are in [`configs/three-dataset-revisions.json`](configs/three-dataset-revisions.json). The default uses seed `20260808`, 1,000 chunks, context/batch size 512, global normalized-text deduplication, a disjoint 10% held-out split, and automatic record clipping. These defaults reproduce the earlier Qwen3.6 calibration selection, but the resulting imatrix is regenerated for each target model.
+The pinned revisions are stored in [`configs/three-dataset-revisions.json`](configs/three-dataset-revisions.json). Sampling uses a fixed seed, deterministic hashing, global text deduplication, equal source budgets, and a held-out split. The resulting imatrix is always regenerated for the target model.
 
-`llama-imatrix` is invoked with all discovered accelerator devices, `-ngl 999`, layer split mode, and `--process-output`. MTP-aware collection is automatic when the model exposes `nextn` tensors; use `--mtp on|off` to override detection.
+To use different compatible Hugging Face datasets, pass their IDs after the script name:
 
-## Automatic Q4/Q8 selection
+```bash
+python3 scripts/build-q4s8-calibration.py \
+  my-org/dataset-a my-org/dataset-b \
+  --model /models/MyModel-BF16.gguf \
+  --llama-root /path/to/llama.cpp \
+  --run-id mymodel-custom-calibration \
+  --output-root /models/q4s8-runs
+```
 
-`scripts/build-q4s8.sh` first runs `llama-quantize --dry-run MODEL Q4_0`. The ranker then reads the BF16 tensor values and optional imatrix `in_sum2` values, estimates Q4_0 versus Q8_0 reconstruction error, and selects promotions until the requested final Q8 byte fraction is reached. `--protect-low-bandwidth` includes small attention/state/shared/output-related candidates before the ranked fill. The generated plan is model-specific and is saved with the run; no hand-written model override is required.
+Dataset formats and field layouts vary. The default adapters support the three pinned datasets; other datasets may require an adapter in the calibration script.
 
-The ranker is a heuristic and must be followed by quality validation. It is not a claim that every model benefits from the same Q8 fraction.
+To reuse calibration text that has already been selected:
 
-## Requirements
+```bash
+python3 scripts/build-q4s8-calibration.py \
+  --model /models/MyModel-BF16.gguf \
+  --llama-root /path/to/llama.cpp \
+  --calibration-dir /models/calibration/datasets \
+  --run-id mymodel-reuse-calibration \
+  --output-root /models/q4s8-runs
+```
 
-- BF16 GGUF source, including split GGUF support through the first shard;
-- llama.cpp build with `llama-imatrix` and `llama-quantize`;
-- Python packages in [`requirements.txt`](requirements.txt);
-- enough storage for source, imatrices, plans, and output shards.
+The directory must contain files named `*-calibration.txt`.
 
-Quantization itself is performed by llama.cpp's quantizer; GPU acceleration applies to calibration/imatrix collection. Tensor ranking and quantization remain CPU-side in the current llama.cpp tools.
+To reuse an existing merged imatrix and skip GPU calibration:
 
-## Historical result
+```bash
+python3 scripts/build-q4s8-calibration.py \
+  --model /models/MyModel-BF16.gguf \
+  --llama-root /path/to/llama.cpp \
+  --imatrix /models/imatrix-merged.gguf \
+  --run-id mymodel-reuse-imatrix \
+  --output-root /models/q4s8-runs
+```
 
-The repository includes the original Qwen3.6-35B-A3B Q4S8 result and measurements as historical evidence in `results/`. They document one model-specific run; the scripts are now model-agnostic. The old Qwen-named files were renamed to generic names. The MTP patch is retained for older fork-specific MTP builds.
+## How Q4 and Q8 are selected
+
+The selection is automatic. You do not write a tensor override file.
+
+The builder:
+
+1. runs `llama-quantize --dry-run MODEL Q4_0`;
+2. treats Q4_0 as the default;
+3. estimates Q4_0 and Q8_0 reconstruction error from BF16 weights;
+4. weights the estimate with `in_sum2` values from the imatrix when available;
+5. promotes tensors until the requested Q8 byte budget is reached;
+6. saves the generated tensor map in the run directory.
+
+The main size/quality control is:
+
+```bash
+--q8-fraction 10
+```
+
+This targets approximately 10% of quantized model bytes as Q8_0. Other useful options are:
+
+```bash
+--q8-fraction 5
+--q8-fraction 15
+--protect-low-bandwidth
+--max-tensor-mib 128
+```
+
+The ranking is a heuristic. Every new model should be validated against BF16 before the result is treated as production-ready.
+
+## Inspect the plan without quantizing
+
+Use the lower-level builder to create only the Q4/Q8 plan:
+
+```bash
+scripts/build-q4s8.sh \
+  --repo /path/to/llama.cpp \
+  --model /models/MyModel-BF16.gguf \
+  --imatrix /models/imatrix-merged.gguf \
+  --output /models/MyModel-Q4S8.gguf \
+  --q8-fraction 10 \
+  --plan-only
+```
+
+The plan directory contains:
+
+- the Q4_0 dry-run log;
+- the Q8 ranking log;
+- the generated tensor override file;
+- the tensor plan;
+- the estimated size summary.
+
+## Outputs
+
+Each run is immutable: choose a new `--run-id` for a new experiment. The run directory contains:
+
+```text
+manifest.json
+ datasets/
+ imatrices/
+ logs/
+ model/
+```
+
+The manifest records the model, datasets, revisions, device selection, imatrix, Q8 budget, and output path.
+
+## Validation
+
+At minimum, compare the BF16 and Q4S8 models using the same input and runtime settings:
+
+```bash
+/path/to/llama.cpp/build/bin/llama-cli \
+  -m /models/MyModel-Q4S8.gguf \
+  -p "Give a short explanation of quantized matrix multiplication." \
+  -n 128 -ngl 999
+```
+
+For quality validation, measure BF16-referenced PPL/KLD on representative and held-out text. For performance validation, use the same GPU split, context, batch, KV-cache type, and number of repetitions for both models.
+
+The imatrix collection uses the GPU. Tensor ranking and the llama.cpp quantizer currently run on the CPU.
+
+## Repository layout
+
+- `scripts/build-q4s8-calibration.py` — complete calibration and quantization workflow;
+- `scripts/build-q4s8.sh` — Q4/Q8 planning and quantization from an existing imatrix;
+- `scripts/rank-q4s8-promotions.py` — automatic BF16 reconstruction-error ranker;
+- `configs/` — shared dataset revision configuration and historical example maps;
+- `docs/METHOD.md` — implementation details and limitations;
+- `results/` — historical measurements, including a Qwen example.
