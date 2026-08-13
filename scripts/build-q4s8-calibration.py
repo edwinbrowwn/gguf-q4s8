@@ -19,6 +19,7 @@ import math
 import os
 import re
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -320,6 +321,7 @@ def main() -> int:
     ap.add_argument("--no-protect-low-bandwidth", action="store_true")
     ap.add_argument("--quantize-threads", type=int, default=24)
     ap.add_argument("--output", default=None, help="final GGUF path or split-model base path")
+    ap.add_argument("--imatrix", default=None, help="reuse an existing merged imatrix and skip collection")
     ap.add_argument("--wiki-fallback", action="store_true", help="use local Wikitext instead of the default HF datasets")
     ap.add_argument("--calibration-dir", default=None, help="reuse existing per-dataset calibration text files instead of downloading HF data")
     ap.add_argument("--prepare-only", action="store_true")
@@ -334,7 +336,7 @@ def main() -> int:
         args.dataset_ids = list(DATASETS_DEFAULT)
         has_hf = True
     args.batch_size = args.batch_size or 512
-    args.iterations = args.iterations or (1000 if has_hf else 100)
+    args.iterations = args.iterations or (1000 if (has_hf or args.calibration_dir) else 100)
     if args.max_record_chars <= 0:
         # Keep each dataset represented by at least this many records, while
         # still allowing naturally short records to remain unmodified.
@@ -370,7 +372,7 @@ def main() -> int:
         "min_records_per_dataset": args.min_records_per_dataset,
         "device_requested": args.device, "tensor_split": args.tensor_split,
         "gpu_layers": args.gpu_layers, "mtp_mode": args.mtp,
-        "q8_fraction": args.q8_fraction,
+        "q8_fraction": args.q8_fraction, "imatrix_requested": args.imatrix,
     }
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -393,26 +395,40 @@ def main() -> int:
     specs: list[tuple[str, int, Path]] = []
     for dataset_id in dataset_ids:
         chunks = quotas[dataset_id]
+        name = safe_name(dataset_id)
+        calibration_path = root / "datasets" / f"{name}-calibration.txt"
+        heldout_path = root / "datasets" / f"{name}-heldout.txt"
+        if args.calibration_dir:
+            # Existing corpora are already deterministically selected. Reuse
+            # them byte-for-byte instead of treating the whole file as one
+            # record and clipping/reselecting it.
+            source = paths[dataset_id][0]
+            shutil.copyfile(source, calibration_path)
+            heldout_path.write_text("")
+            cmeta = {"path": str(calibration_path), "source": str(source),
+                     "reused": True, "chars": calibration_path.stat().st_size}
+            hmeta = {"path": str(heldout_path), "reused": True, "chars": 0}
+            manifest.setdefault("datasets", {})[dataset_id] = {
+                "scanned_records": None, "selected_calibration": None,
+                "selected_heldout": 0, "calibration": cmeta, "heldout": hmeta,
+            }
+            specs.append((name, chunks, calibration_path))
+            print(f"{dataset_id}: reused={source} chunks={chunks}", flush=True)
+            continue
         if dataset_id == "wikitext-fallback":
             text = Path(paths[dataset_id][0]).read_text(encoding="utf-8")
             records = [{"uid": "wiki.train.raw", "text": text, "digest": digest_text(text), "component": "all", "split": "calibration", "score": 0}]
             scanned = 1
         else:
-            if args.calibration_dir:
-                text = paths[dataset_id][0].read_text(encoding="utf-8")
-                records = [{"uid": str(paths[dataset_id][0]), "text": text, "digest": digest_text(text), "component": "all", "split": "calibration", "score": 0}]
-                scanned = 1
-            else:
-                records, _, scanned = collect(dataset_id, paths[dataset_id], args, global_digests)
+            records, _, scanned = collect(dataset_id, paths[dataset_id], args, global_digests)
         calibration, heldout = choose(records, dataset_id, chunks, args)
-        name = safe_name(dataset_id)
-        cmeta = write_corpus(root / "datasets" / f"{name}-calibration.txt", calibration, dataset_id)
-        hmeta = write_corpus(root / "datasets" / f"{name}-heldout.txt", heldout, dataset_id)
+        cmeta = write_corpus(calibration_path, calibration, dataset_id)
+        hmeta = write_corpus(heldout_path, heldout, dataset_id)
         manifest.setdefault("datasets", {})[dataset_id] = {
             "scanned_records": scanned, "selected_calibration": len(calibration),
             "selected_heldout": len(heldout), "calibration": cmeta, "heldout": hmeta,
         }
-        specs.append((name, chunks, root / "datasets" / f"{name}-calibration.txt"))
+        specs.append((name, chunks, calibration_path))
         print(f"{dataset_id}: scanned={scanned} selected={len(calibration)} heldout={len(heldout)} chunks={chunks}", flush=True)
     manifest["status"] = "prepared"
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -443,15 +459,24 @@ def main() -> int:
             import sys as _sys
             _sys.path.insert(0, str(Path(args.llama_root) / "gguf-py"))
             from gguf import GGUFReader
-            model_parts = sorted(Path(args.model).parent.glob(Path(args.model).name.replace("-00001-of-", "-*") ))
-            model_parts = model_parts or [Path(args.model)]
+            part_match = re.match(r"^(.*)-[0-9]{5}-of-([0-9]{5})\.gguf$", Path(args.model).name)
+            if part_match:
+                prefix, count = part_match.groups()
+                model_parts = sorted(Path(args.model).parent.glob(f"{prefix}-?????-of-{count}.gguf"))
+            else:
+                model_parts = [Path(args.model)]
             mtp_enabled = any("nextn" in t.name.lower() for part in model_parts for t in GGUFReader(str(part)).tensors)
         except Exception:
             mtp_enabled = False
     if mtp_enabled:
         env["LLAMA_IMATRIX_PROCESS_MTP"] = "1"
     matrices: list[Path] = []
-    if not args.no_imatrix:
+    if args.imatrix:
+        merged = Path(args.imatrix).resolve()
+        if not merged.is_file():
+            raise SystemExit(f"existing imatrix does not exist: {merged}")
+        manifest["imatrix_reused"] = str(merged)
+    elif not args.no_imatrix:
         for name, chunks, corpus in specs:
             matrix = root / "imatrices" / f"imatrix-{name}.gguf"
             run([str(bin_dir / "llama-imatrix"), "-m", args.model, "-f", str(corpus), "-o", str(matrix),

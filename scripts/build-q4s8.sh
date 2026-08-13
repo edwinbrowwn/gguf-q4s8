@@ -138,6 +138,8 @@ echo "[4/4] validating output artifacts"
 if [[ "$MODEL" =~ -[0-9]{5}-of-([0-9]{5})\.gguf$ ]]; then
     count=${BASH_REMATCH[1]}
     out_base=${OUTPUT%.gguf}
+    # llama-quantize treats the supplied output as a prefix when --keep-split
+    # is enabled and appends -NNNNN-of-NNNNN.gguf.
     for ((i=1; i<=10#$count; i++)); do
         shard=$(printf '%s-%05d-of-%s.gguf' "$out_base" "$i" "$count")
         [[ -s "$shard" ]] || die "missing output shard: $shard"

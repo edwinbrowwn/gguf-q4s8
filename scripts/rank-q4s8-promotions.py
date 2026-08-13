@@ -121,6 +121,7 @@ def main() -> int:
         if imp is not None:
             vals = np.asarray(imp.data, dtype=np.float32).reshape(-1)
             if vals.size == ncols: importance = vals
+            elif vals.size == int(np.prod(shape[1:])): importance = vals.reshape(-1, ncols).mean(axis=0)
         e4 = e8 = 0.0
         for start in range(0, words.shape[0], max(1, args.chunk_rows)):
             a, b = error_for_chunk(words[start:start + args.chunk_rows], importance)
