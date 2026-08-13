@@ -5,7 +5,7 @@ set -Eeuo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  optimize-qwen35-s8.sh --input PATH --bf16 PATH --out-root PATH \
+  optimize-q4s8.sh --input PATH --bf16 PATH --out-root PATH \
     --code-kld-base PATH --wiki-kld-base PATH [options]
 
 The input BF16 GGUF must already exist. Candidates are built from that source;
@@ -102,7 +102,7 @@ BUILD_DIR=$(readlink -f -- "$BUILD_DIR")
 [[ -z "$STOCK_Q40" || -f "$STOCK_Q40" ]] || die "stock Q4_0 map does not exist: $STOCK_Q40"
 [[ -f "$CODE_KLD" ]] || { [[ "$SKIP_KLD" -eq 1 ]] || die "code KLD base does not exist: $CODE_KLD"; }
 [[ -f "$WIKI_KLD" ]] || { [[ "$SKIP_KLD" -eq 1 ]] || die "wiki KLD base does not exist: $WIKI_KLD"; }
-BUILDER="$TOOL_ROOT/scripts/build-qwen35-q4-0-s8.sh"
+BUILDER="$TOOL_ROOT/scripts/build-q4s8.sh"
 QUANT="$BUILD_DIR/bin/llama-quantize"
 PPL="$BUILD_DIR/bin/llama-perplexity"
 BENCH="$BUILD_DIR/bin/llama-bench"
@@ -131,8 +131,8 @@ export NCCL_P2P_LEVEL="${NCCL_P2P_LEVEL:-PXB}"
 export GGML_TP_SHARDED_OUTPUT="${GGML_TP_SHARDED_OUTPUT:-1}"
 # Respect caller setting GGML_HIP_GFX1030_NATIVE; unset means stock kernels.
 
-if [[ -z "$IMATRIX" && -f "$HOME/models/qwen35-imatrix/imatrix_unsloth.gguf_file" ]]; then
-    IMATRIX="$HOME/models/qwen35-imatrix/imatrix_unsloth.gguf_file"
+if [[ -z "$IMATRIX" && -f "$HOME/models/q4s8-imatrix/imatrix.gguf" ]]; then
+    IMATRIX="$HOME/models/q4s8-imatrix/imatrix.gguf"
 fi
 if [[ -n "$IMATRIX" ]]; then
     IMATRIX=$(readlink -f -- "$IMATRIX")
@@ -197,7 +197,7 @@ run_mtp() {
 }
 
 for stage in "${STAGE_LIST[@]}"; do
-    model="$OUT_ROOT/$stage/Qwen3.6-35B-A3B-MTP-Q4_0-S8-$stage.gguf"
+    model="$OUT_ROOT/$stage/$stage/model-Q4S8.gguf"
     [[ -f "$model" ]] || die "candidate GGUF missing: $model"
     if [[ "$SKIP_KLD" -eq 0 ]]; then
         echo "[kld] $stage"

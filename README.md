@@ -1,116 +1,74 @@
 # gguf-q4s8
 
-A reproducible mixed-precision GGUF recipe for **Qwen3.6-35B-A3B with embedded MTP**. The project name “Q4S8” is shorthand for a Q4_0 base with selected tensors promoted to Q8_0 and sensitive state/norm tensors retained as F32. It does not introduce a new GGUF tensor type.
+`gguf-q4s8` is a reproducible, model-agnostic mixed-precision GGUF workflow. It starts from a BF16 GGUF, uses calibration data to generate an importance matrix on GPU, keeps Q4_0 as the base, and automatically promotes selected tensors to Q8_0 under a byte budget. Q4S8 is a recipe, not a new GGUF tensor type.
 
-## Result
+## One-command workflow
 
-The selected three-dataset recipe produced a **20,152.29 MiB (4.76 BPW)** model from a 67,764.29 MiB BF16 source, a **70.26% size reduction**. The final tensor map contained:
+Build or use a llama.cpp tree with `llama-imatrix` and `llama-quantize`, install the Python dependencies, then run:
 
-| Type | Tensors |
-|---|---:|
-| F32 | 370 |
-| Q4_0 | 119 |
-| Q4_1 | 10 |
-| Q8_0 | 254 |
+```bash
+python3 scripts/build-q4s8-calibration.py \
+  --model /models/Muse-Glimmer-30B-BF16-00001-of-00002.gguf \
+  --llama-root /src/llama.cpp \
+  --run-id muse-glimmer-q4s8-v1 \
+  --output-root /models/q4s8-runs \
+  --device auto \
+  --q8-fraction 10
+```
 
-The large MoE expert matrices remain predominantly Q4. Smaller attention, shared-expert, recurrent-output, and other error-sensitive tensors are promoted to Q8. Recurrent controls and normalization tensors remain F32. The output head and the draft-only MTP `eh_proj` use Q4_0.
+The model argument is the first shard for a split GGUF. The loader discovers the remaining shards. `--device auto` discovers accelerator devices; use `--device ROCm0,ROCm1,ROCm2,ROCm3` when explicit routing is required. The calibration command defaults to the pinned three-dataset recipe below. Pass dataset IDs positionally to use another compatible set, or `--calibration-dir DIR` to reuse existing `*-calibration.txt` files.
 
-### Quality against BF16
+The command creates an immutable run directory containing selected corpora, GPU-generated per-source imatrices, a merged imatrix, Q4 dry-run output, the automatic Q8 ranking, tensor overrides, quantization logs, and the final GGUF. Existing run IDs are never overwritten.
 
-KLD was measured from the quantized token distribution to the BF16 reference distribution. “Same top” is the fraction of positions where both distributions selected the same highest-probability token.
+For a prepared calibration-only run:
 
-| Evaluation set | BF16 PPL | Q4S8 PPL | PPL change | Mean KLD | Same top |
-|---|---:|---:|---:|---:|---:|
-| Code, 20 chunks | 2.571697 | 2.613995 | +1.645% | 0.023788 ± 0.000964 | 95.471% |
-| Wikitext, 20 chunks | 6.597632 | 6.716739 | +1.805% | 0.027803 ± 0.000888 | 92.078% |
-| Held-out Open-SWE, 500 chunks | 2.179704 | 2.198697 | +0.871% | 0.108394 ± 0.001881 | 93.684% |
+```bash
+python3 scripts/build-q4s8-calibration.py \
+  --model /models/model-BF16.gguf --llama-root /src/llama.cpp \
+  --run-id model-calibration --prepare-only
+```
 
-The held-out Open-SWE KLD is heavy-tailed: median `0.001331`, 95th percentile `0.311899`, and 99th percentile `2.478030`. KLD and same-top agreement measure distribution fidelity; they are not substitutes for downstream task evaluation.
+For an existing merged imatrix and no calibration collection, use the lower-level builder:
 
-### Performance
+```bash
+scripts/build-q4s8.sh \
+  --repo /src/llama.cpp \
+  --model /models/model-BF16.gguf \
+  --imatrix /models/imatrix-merged.gguf \
+  --output /models/model-Q4S8.gguf \
+  --q8-fraction 10 \
+  --protect-low-bandwidth
+```
 
-Measured on four Radeon Pro V620 32 GiB GPUs with ROCm, layer split `1/1/1/1`, Flash Attention enabled, `-b 2048`, `-ub 256`, and F16 KV cache.
+Use `--plan-only` to inspect the Q4 base, ranked promotions, estimated size, and generated tensor map without writing a model.
 
-| Test | Result |
-|---|---:|
-| PP4096 | **6246.05 tok/s** |
-| Normal decode, six-prompt mean | **81.393 tok/s** |
-| MTP decode, six-prompt mean | **120.398 tok/s** |
-| MTP draft acceptance | **64.012%** |
-| MTP throughput gain over normal decode | **+47.92%** |
+## Default calibration recipe
 
-PP4096 samples were `6245.76`, `6251.07`, and `6241.30` tok/s. Across the six generation prompts, normal decode ranged from `81.22–81.55` tok/s; MTP ranged from `107.87–147.27` tok/s with acceptance from `53.66–87.03%`.
-
-A same-recipe, five-prompt A/B test of the draft-only MTP projection found Q4_0 effectively neutral relative to Q8_0: `119.288` vs `118.623` tok/s and `62.902%` vs `62.881%` mean acceptance, while saving about 4 MiB.
-
-Machine-readable measurements are in [`results/qwen35-q4s8-v1.json`](results/qwen35-q4s8-v1.json).
-
-## Calibration and quantization
-
-The reported model used 1,000 calibration chunks split equally across:
+The default corpus is split equally across:
 
 - `nvidia/Open-SWE-Traces`
 - `nvidia/Nemotron-SFT-Math-v4`
 - `nvidia/ChatQA2-Long-SFT-data`
 
-Dataset revisions are pinned in [`results/qwen35-q4s8-v1-revisions.json`](results/qwen35-q4s8-v1-revisions.json). Sampling uses a fixed seed (`20260808`), stable SHA-256 ordering, global deduplication, a disjoint 10% held-out split, and a 24,000-character record cap. Per-source MTP-aware importance matrices are collected and then merged before quantization.
+The pinned revisions are in [`configs/three-dataset-revisions.json`](configs/three-dataset-revisions.json). The default uses seed `20260808`, 1,000 chunks, context/batch size 512, global normalized-text deduplication, a disjoint 10% held-out split, and automatic record clipping. These defaults reproduce the earlier Qwen3.6 calibration selection, but the resulting imatrix is regenerated for each target model.
 
-The exact tensor map is [`configs/qwen35-q4s8-v1-overrides.txt`](configs/qwen35-q4s8-v1-overrides.txt).
+`llama-imatrix` is invoked with all discovered accelerator devices, `-ngl 999`, layer split mode, and `--process-output`. MTP-aware collection is automatic when the model exposes `nextn` tensors; use `--mtp on|off` to override detection.
 
-## Reproduce
+## Automatic Q4/Q8 selection
 
-Requirements:
+`scripts/build-q4s8.sh` first runs `llama-quantize --dry-run MODEL Q4_0`. The ranker then reads the BF16 tensor values and optional imatrix `in_sum2` values, estimates Q4_0 versus Q8_0 reconstruction error, and selects promotions until the requested final Q8 byte fraction is reached. `--protect-low-bandwidth` includes small attention/state/shared/output-related candidates before the ranked fill. The generated plan is model-specific and is saved with the run; no hand-written model override is required.
 
-1. A BF16 Qwen3.6-35B-A3B GGUF with embedded MTP.
-2. A built, MTP-capable llama.cpp tree.
-3. Python packages from `requirements.txt`.
-4. About 70 GiB for the BF16 model plus output and calibration artifacts.
+The ranker is a heuristic and must be followed by quality validation. It is not a claim that every model benefits from the same Q8 fraction.
 
-The calibration pipeline needs an MTP-aware `llama-imatrix`. If the target llama.cpp tree does not contain that probe, apply [`patches/llama-imatrix-mtp.patch`](patches/llama-imatrix-mtp.patch). The patch depends on the MTP context/embedding APIs from the associated llama.cpp fork and may require rebasing against other revisions.
+## Requirements
 
-```bash
-git clone https://github.com/edwinbrowwn/gguf-q4s8.git
-cd gguf-q4s8
-python3 -m pip install -r requirements.txt
+- BF16 GGUF source, including split GGUF support through the first shard;
+- llama.cpp build with `llama-imatrix` and `llama-quantize`;
+- Python packages in [`requirements.txt`](requirements.txt);
+- enough storage for source, imatrices, plans, and output shards.
 
-python3 scripts/build-qwen35-three-dataset-mtp-recipe.py \
-  nvidia/Open-SWE-Traces \
-  nvidia/Nemotron-SFT-Math-v4 \
-  nvidia/ChatQA2-Long-SFT-data \
-  --model /models/Qwen3.6-35B-A3B-MTP-BF16.gguf \
-  --llama-root /src/llama.cpp \
-  --revisions-file results/qwen35-q4s8-v1-revisions.json \
-  --run-id qwen35-q4s8-v1 \
-  --batch-size 512 \
-  --context-size 512 \
-  --iterations 1000 \
-  --seed 20260808 \
-  --holdout-fraction 0.10 \
-  --download-workers 3 \
-  --candidate-records 4000 \
-  --max-record-chars 24000
-```
+Quantization itself is performed by llama.cpp's quantizer; GPU acceleration applies to calibration/imatrix collection. Tensor ranking and quantization remain CPU-side in the current llama.cpp tools.
 
-For type-map experiments without the three-dataset pipeline, use:
+## Historical result
 
-```bash
-scripts/build-qwen35-q4-0-s8.sh \
-  --repo /src/llama.cpp \
-  --input /models/Qwen3.6-35B-A3B \
-  --out-dir /models/qwen35-q4s8 \
-  --stage auto \
-  --auto-q8-fraction 10 \
-  --threads 24
-```
-
-See [`docs/METHOD.md`](docs/METHOD.md) for measurement commands and limitations.
-
-## Repository contents
-
-- `configs/`: exact reported tensor-type policy.
-- `scripts/build-qwen35-three-dataset-mtp-recipe.py`: deterministic calibration, MTP imatrix collection, merge, and quantization.
-- `scripts/build-qwen35-q4-0-s8.sh`: stock/fixed/native/automatic tensor-map builder.
-- `scripts/rank-q4-0-q8-promotions.py`: BF16 reconstruction-error ranker.
-- `scripts/optimize-qwen35-s8.sh`: candidate KLD and throughput sweep.
-- `patches/`: MTP-aware imatrix integration used by the calibration pipeline.
-- `results/`: concise, machine-readable evidence for the reported run.
+The repository includes the original Qwen3.6-35B-A3B Q4S8 result and measurements as historical evidence in `results/`. They document one model-specific run; the scripts are now model-agnostic. The old Qwen-named files were renamed to generic names. The MTP patch is retained for older fork-specific MTP builds.
