@@ -34,7 +34,7 @@ This is an engineering heuristic, not a universal quality guarantee. Validate wi
 
 ## Split GGUF
 
-Pass the first source shard to both `build-q4s8-calibration.py` and `build-q4s8.sh`. llama.cpp reads the split metadata and `--keep-split` emits matching numbered output shards. The automatic ranker reads all source shards before computing scores.
+Pass the first source shard to both `build-q4s8-calibration.py` and `build-q4s8.sh`. The automatic ranker reads all source shards before computing scores. The standard Q4S8 deliverable is one merged GGUF even when the BF16 source is split; `--keep-split` is an explicit opt-in for numbered output shards.
 
 ## Validation
 

@@ -75,7 +75,7 @@ For explicit GPU routing:
 
 Use the devices reported by your llama.cpp build. `--device auto` discovers accelerator devices automatically.
 
-The first shard is the only model path you pass for a split GGUF. The remaining shards are discovered automatically, and the quantizer writes matching numbered output shards.
+The first shard is the only model path you pass for a split GGUF. The remaining source shards are discovered automatically. By default the quantizer writes one merged output GGUF; pass `--keep-split` to `scripts/build-q4s8.sh` only when sharded output is explicitly wanted.
 
 ## Calibration data
 

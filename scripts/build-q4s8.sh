@@ -17,6 +17,7 @@ Options:
   --q8-fraction PCT           maximum Q8_0 fraction of quantized bytes (default: 10)
   --max-tensor-mib N          rank only tensors no larger than N MiB (default: unlimited)
   --protect-low-bandwidth     retain small attention/state/shared tensors as Q8 candidates
+  --keep-split                opt in to output shards matching a split source
   --threads N                 quantizer threads (default: physical core count)
   --plan-only                 create dry-run, ranking, and override artifacts only
   --force                     replace existing plan/output artifacts
@@ -40,6 +41,7 @@ IMATRIX=
 Q8_FRACTION=10
 MAX_TENSOR_MIB=0
 PROTECT=0
+KEEP_SPLIT=0
 THREADS=
 PLAN_ONLY=0
 FORCE=0
@@ -55,6 +57,7 @@ while (($#)); do
         --q8-fraction) [[ $# -ge 2 ]] || die "--q8-fraction needs a percentage"; Q8_FRACTION=$2; shift 2 ;;
         --max-tensor-mib) [[ $# -ge 2 ]] || die "--max-tensor-mib needs a size"; MAX_TENSOR_MIB=$2; shift 2 ;;
         --protect-low-bandwidth) PROTECT=1; shift ;;
+        --keep-split) KEEP_SPLIT=1; shift ;;
         --threads) [[ $# -ge 2 ]] || die "--threads needs a number"; THREADS=$2; shift 2 ;;
         --plan-only) PLAN_ONLY=1; shift ;;
         --force) FORCE=1; shift ;;
@@ -128,26 +131,36 @@ if [[ -e "$OUTPUT" && "$FORCE" -ne 1 ]]; then
 fi
 
 echo "[3/4] quantizing with automatic tensor map"
-quant_args=(--pure --keep-split --tensor-type-file "$OVERRIDES")
+# A split BF16 source is read as a whole, but the default deliverable is one
+# merged GGUF. Sharding is explicit opt-in so a two-shard source cannot silently
+# produce a two-or-more-shard final model.
+quant_args=(--pure --tensor-type-file "$OVERRIDES")
+[[ "$KEEP_SPLIT" -eq 1 ]] && quant_args+=(--keep-split)
 [[ -n "$IMATRIX" ]] && quant_args+=(--imatrix "$IMATRIX")
 "$QUANT" "${quant_args[@]}" "$MODEL" "$OUTPUT" Q4_0 "$THREADS" >"$PLAN/quantize.log" 2>&1
 cat "$PLAN/quantize.log"
 
 echo "[4/4] validating output artifacts"
-# A split source produces numbered output shards; a single source produces OUTPUT.
-if [[ "$MODEL" =~ -[0-9]{5}-of-([0-9]{5})\.gguf$ ]]; then
-    count=${BASH_REMATCH[1]}
-    out_base=${OUTPUT%.gguf}
-    # llama-quantize treats the supplied output as a prefix when --keep-split
-    # is enabled and appends -NNNNN-of-NNNNN.gguf.
-    for ((i=1; i<=10#$count; i++)); do
-        shard=$(printf '%s-%05d-of-%s.gguf' "$out_base" "$i" "$count")
-        [[ -s "$shard" ]] || die "missing output shard: $shard"
-    done
-    echo "validated $count split output shards"
+if [[ "$KEEP_SPLIT" -eq 1 ]]; then
+    if [[ "$MODEL" =~ -[0-9]{5}-of-([0-9]{5})\.gguf$ ]]; then
+        count=${BASH_REMATCH[1]}
+        out_base=${OUTPUT%.gguf}
+        for ((i=1; i<=10#$count; i++)); do
+            shard=$(printf '%s-%05d-of-%s.gguf' "$out_base" "$i" "$count")
+            [[ -s "$shard" ]] || die "missing output shard: $shard"
+        done
+        echo "validated $count split output shards"
+    else
+        die "--keep-split requires a split source"
+    fi
 else
-    [[ -s "$OUTPUT" ]] || die "missing output: $OUTPUT"
-    echo "validated output: $OUTPUT"
+    [[ -s "$OUTPUT" ]] || die "missing merged output: $OUTPUT"
+    # Guard the single-file contract: no numbered output shard may be left beside
+    # the requested file, even if a stale artifact existed from an older run.
+    if compgen -G "${OUTPUT%.gguf}-?????-of-?????.gguf" >/dev/null; then
+        die "numbered output shards found beside single-file output"
+    fi
+    echo "validated single merged output: $OUTPUT"
 fi
 
 echo "Q4S8 build complete"
